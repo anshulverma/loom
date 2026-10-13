@@ -1,10 +1,13 @@
+from pathlib import Path
+
 import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.utils.data import TensorDataset
 from torchdata.nodes import BaseNode
 
-from loom import DataFeed, Task, build_pipeline
+import loom
+from loom import DataFeed, RunConfig, Runner, Task, build_pipeline
 
 NUM_FEATURES = 16
 NUM_CLASSES = 4
@@ -80,3 +83,30 @@ class MLPClassifier(Task):
 
     def build_optimizer(self):
         return torch.optim.AdamW(self.parameters(), lr=1e-2)
+
+
+def main(
+    out_dir: Path = Path("runs/mlp_classifier"),
+    max_epochs: int = 5,
+    device: str | None = None,
+) -> dict[str, float]:
+    """Fit, evaluate and predict; delete runs/mlp_classifier before re-running."""
+    loom.seed(0)
+    task = MLPClassifier()
+    data = make_data()
+    runner = Runner(
+        RunConfig(
+            max_epochs=max_epochs,
+            device=device,
+            checkpoint_dir=out_dir / "checkpoints",
+            checkpoint_every_n_steps=50,
+        )
+    )
+    runner.fit(task, data)
+    metrics = runner.evaluate(task, data)
+    runner.predict(task, data, output_dir=out_dir / "predictions")
+    return metrics
+
+
+if __name__ == "__main__":
+    main()

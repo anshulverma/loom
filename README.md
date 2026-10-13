@@ -8,6 +8,23 @@ inference. Not for serving.
 ```bash
 uv sync
 uv run pytest
+uv run python examples/mlp_classifier.py  # delete runs/mlp_classifier before re-running
+```
+
+```python
+from loom import DataFeed, RunConfig, Runner, Task, build_pipeline
+
+
+class Net(Task): ...  # train_step, eval_step, predict_step, build_optimizer
+
+
+class Feed(DataFeed): ...  # *_pipeline() returns build_pipeline(ds, batch_size=32)
+
+
+task, feed, runner = Net(), Feed(), Runner(RunConfig(max_epochs=3))
+runner.fit(task, feed)
+metrics = runner.evaluate(task, feed)
+runner.predict(task, feed, output_dir="runs/preds")
 ```
 
 ## Layout
