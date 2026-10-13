@@ -163,3 +163,139 @@ def test_empty_train_epoch_raises():
 def test_unavailable_cuda_raises():
     with pytest.raises(ValueError):
         Runner(RunConfig(max_steps=1, device="cuda"))
+
+
+class _LinearTask(Task):
+    def __init__(self):
+        super().__init__()
+        self.lin = nn.Linear(4, 1)
+        self.opt_factory = lambda params: torch.optim.SGD(params, lr=0.1)
+
+    def train_step(self, batch):
+        x, y = batch
+        return nn.functional.mse_loss(self.lin(x), y)
+
+    def build_optimizer(self):
+        return self.opt_factory(self.parameters())
+
+
+def _linear_feed(rows, batch_size):
+    g = torch.Generator().manual_seed(0)
+    data = TensorDataset(
+        torch.randn(rows, 4, generator=g), torch.randn(rows, 1, generator=g)
+    )
+    return _Feed(train=lambda: build_pipeline(data, batch_size=batch_size))
+
+
+def _linear_pair():
+    seed(0)
+    a = _LinearTask()
+    b = _LinearTask()
+    b.load_state_dict(a.state_dict())
+    return a, b
+
+
+def test_grad_accumulation_matches_large_batch():
+    a, b = _linear_pair()
+    Runner(cfg(max_epochs=1)).fit(a, _linear_feed(64, 8))
+    Runner(cfg(max_epochs=1, grad_accum_steps=2)).fit(b, _linear_feed(64, 4))
+    assert all(
+        torch.allclose(p, q, atol=1e-6)
+        for p, q in zip(a.parameters(), b.parameters(), strict=True)
+    )
+
+
+def test_partial_window_is_true_mean():
+    task = _LinearTask()
+    recorded = []
+
+    class Recording(torch.optim.SGD):
+        def step(self, closure=None):
+            recorded.append([p.grad.clone() for p in task.parameters()])
+            return super().step(closure)
+
+    task.opt_factory = lambda params: Recording(params, lr=0.0)
+    feed = _linear_feed(24, 4)
+    batches = list(feed.train_pipeline())
+    expected = [torch.zeros_like(p) for p in task.parameters()]
+    for batch in batches[4:]:
+        task.zero_grad()
+        task.train_step(batch).backward()
+        for e, p in zip(expected, task.parameters(), strict=True):
+            e += p.grad / 2
+    out = Runner(cfg(max_epochs=1, grad_accum_steps=4)).fit(task, feed)
+    assert out["step"] == 2
+    assert all(
+        torch.allclose(g, e, atol=1e-6)
+        for g, e in zip(recorded[1], expected, strict=True)
+    )
+
+
+def _grad_norms(max_grad_norm):
+    norms = []
+    task = MLPClassifier()
+
+    class Recording(torch.optim.AdamW):
+        def step(self, closure=None):
+            norms.append(
+                torch.linalg.vector_norm(
+                    torch.stack(
+                        [torch.linalg.vector_norm(p.grad) for p in task.parameters()]
+                    )
+                ).item()
+            )
+            return super().step(closure)
+
+    task.build_optimizer = lambda: Recording(task.parameters(), lr=1e-2)
+    Runner(cfg(max_steps=5, max_grad_norm=max_grad_norm)).fit(
+        task, _Feed(train=small.train_pipeline)
+    )
+    return norms
+
+
+def test_grad_clipping_caps_norm():
+    assert max(_grad_norms(1e-3)) <= 1e-3 + 1e-6
+    assert min(_grad_norms(None)) > 1e-3
+
+
+def test_grad_norm_logged_only_when_clipping(caplog):
+    caplog.set_level("INFO", logger="loom")
+    Runner(cfg(max_steps=2, log_every_n_steps=2, max_grad_norm=1.0)).fit(
+        MLPClassifier(), _Feed(train=small.train_pipeline)
+    )
+    Runner(cfg(max_steps=2, log_every_n_steps=2)).fit(
+        MLPClassifier(), _Feed(train=small.train_pipeline)
+    )
+    lines = [m for m in caplog.messages if "train/loss=" in m]
+    assert len(lines) == 2
+    assert "grad_norm=" in lines[0] and "grad_norm=" not in lines[1]
+
+
+def test_non_finite_grad_norm_raises():
+    class NanGrad(_ParamTask):
+        def train_step(self, batch):
+            return torch.sqrt(self.w**2).sum()
+
+    with pytest.raises(FloatingPointError, match="grad"):
+        Runner(cfg(max_steps=1, max_grad_norm=1.0)).fit(
+            NanGrad(), _Feed(train=small.train_pipeline)
+        )
+
+
+def test_scheduler_steps_per_step():
+    task = MLPClassifier()
+    opts = []
+    base_build = task.build_optimizer
+    task.build_optimizer = lambda: opts.append(base_build()) or opts[0]
+    task.build_scheduler = lambda opt: torch.optim.lr_scheduler.StepLR(
+        opt, step_size=1, gamma=0.5
+    )
+    Runner(cfg(max_steps=3)).fit(task, _Feed(train=small.train_pipeline))
+    assert opts[0].param_groups[0]["lr"] == pytest.approx(1e-2 * 0.125)
+
+
+def test_plateau_scheduler_rejected():
+    task = MLPClassifier()
+    task.build_scheduler = lambda opt: torch.optim.lr_scheduler.ReduceLROnPlateau(opt)
+    with pytest.raises(TypeError, match="ReduceLROnPlateau"):
+        Runner(cfg(max_steps=1)).fit(task, small)

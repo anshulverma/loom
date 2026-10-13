@@ -123,6 +123,11 @@ class Runner:
         _require(task, ("train_step", "build_optimizer"), "fit")
         task = self._setup(task)
         opt = task.build_optimizer()
+        sched = task.build_scheduler(opt)
+        if isinstance(sched, torch.optim.lr_scheduler.ReduceLROnPlateau):
+            raise TypeError(
+                "ReduceLROnPlateau needs a metric; use a step-based scheduler"
+            )
         task.zero_grad(set_to_none=True)
         train_loader = _to_loader(data.train_pipeline(), "train_pipeline")
         if train_loader is None:
@@ -138,6 +143,7 @@ class Runner:
         window_loss = torch.zeros((), device=self.device)
         log_window: list[torch.Tensor] = []
         train_loss: float | None = None
+        last_norm = torch.zeros((), device=self.device)
         eval_metrics: dict[str, float] = {}
 
         def max_steps_reached() -> bool:
@@ -148,7 +154,10 @@ class Runner:
             train_loss = torch.stack(log_window).mean().item()
             log_window.clear()
             lr = opt.param_groups[0]["lr"]
-            self._log({"epoch": epoch, "train/loss": train_loss, "lr": lr}, step)
+            metrics = {"epoch": epoch, "train/loss": train_loss, "lr": lr}
+            if cfg.max_grad_norm is not None:
+                metrics["grad_norm"] = last_norm.item()
+            self._log(metrics, step)
 
         def run_eval() -> None:
             nonlocal eval_metrics, last_eval_step
@@ -158,10 +167,18 @@ class Runner:
             last_eval_step = step
 
         def boundary(k: int) -> None:
-            nonlocal step, window_loss
+            nonlocal step, window_loss, last_norm
             if not torch.isfinite(window_loss):
                 raise FloatingPointError(f"non-finite loss at step {step + 1}")
+            if cfg.max_grad_norm is not None:
+                last_norm = torch.nn.utils.clip_grad_norm_(
+                    task.parameters(), cfg.max_grad_norm
+                )
+                if not torch.isfinite(last_norm):
+                    raise FloatingPointError(f"non-finite grad norm at step {step + 1}")
             opt.step()
+            if sched is not None:
+                sched.step()
             task.zero_grad(set_to_none=True)
             step += 1
             log_window.append(window_loss / k)
@@ -203,6 +220,9 @@ class Runner:
             if max_steps_reached():
                 break
             if k:
+                for p in task.parameters():
+                    if p.grad is not None:
+                        p.grad.mul_(accum / k)
                 boundary(k)
                 if max_steps_reached():
                     break
