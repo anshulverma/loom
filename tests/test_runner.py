@@ -8,7 +8,15 @@ from torch import nn
 from torch.utils.data import TensorDataset
 from torchdata.nodes import IterableWrapper
 
-from loom import DataFeed, RunConfig, Runner, Task, build_pipeline, seed
+from loom import (
+    DataFeed,
+    RunConfig,
+    Runner,
+    Task,
+    build_pipeline,
+    latest_checkpoint,
+    seed,
+)
 from loom.runner import _to_device
 
 
@@ -104,7 +112,7 @@ def test_non_scalar_loss_raises():
         Runner(cfg(max_steps=1)).fit(PerSample(), small)
 
 
-def test_non_finite_loss_raises():
+def test_non_finite_loss_raises(tmp_path):
     class NanOnThird(MLPClassifier):
         calls = 0
 
@@ -113,8 +121,10 @@ def test_non_finite_loss_raises():
             loss = super().train_step(batch)
             return loss * float("nan") if self.calls == 3 else loss
 
+    run = cfg(max_epochs=1, checkpoint_dir=tmp_path, checkpoint_every_n_steps=1)
     with pytest.raises(FloatingPointError, match="step 3"):
-        Runner(cfg(max_epochs=1)).fit(NanOnThird(), small)
+        Runner(run).fit(NanOnThird(), small)
+    assert latest_checkpoint(tmp_path).name == "step-00000002.pt"
 
 
 def test_missing_override_raises():

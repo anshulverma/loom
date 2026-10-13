@@ -9,6 +9,14 @@ from typing import Any, Literal
 
 import torch
 
+from loom.checkpoint import (
+    _checkpoint_steps,
+    _jsonable_config,
+    latest_checkpoint,
+    load_checkpoint,
+    restore_rng,
+    save_checkpoint,
+)
 from loom.data import DataFeed, _to_loader
 from loom.task import Task
 
@@ -91,6 +99,28 @@ def _require(task: Task, methods: tuple[str, ...], entry: str) -> None:
             )
 
 
+def _resolve_resume(cfg: RunConfig) -> dict | None:
+    path = cfg.resume_from
+    if path == "latest":
+        path = latest_checkpoint(cfg.checkpoint_dir)
+    elif path is not None and not Path(path).is_file():
+        raise FileNotFoundError(f"resume_from {str(path)!r} is not a file")
+    ckpt = None if path is None else load_checkpoint(path)
+    if cfg.checkpoint_dir is not None:
+        newest = max(_checkpoint_steps(cfg.checkpoint_dir), default=None)
+        if newest is not None and ckpt is None:
+            raise FileExistsError(
+                f"{cfg.checkpoint_dir} holds checkpoints up to step {newest}; "
+                "resume with resume_from='latest' or use an empty checkpoint_dir"
+            )
+        if newest is not None and newest > ckpt["step"]:
+            raise FileExistsError(
+                f"{cfg.checkpoint_dir} holds step {newest}, newer than the "
+                f"resume point step {ckpt['step']}"
+            )
+    return ckpt
+
+
 class Runner:
     """Stateless loop driver: owns device, precision, accumulation and cadences."""
 
@@ -119,6 +149,7 @@ class Runner:
     def fit(self, task: Task, data: DataFeed) -> dict[str, float]:
         cfg = self.config
         start = time.perf_counter()
+        ckpt = _resolve_resume(cfg)
         seed(cfg.seed)
         _require(task, ("train_step", "build_optimizer"), "fit")
         task = self._setup(task)
@@ -139,7 +170,8 @@ class Runner:
             logger.info("no eval_pipeline; eval skipped")
 
         accum = cfg.grad_accum_steps
-        step, epoch, last_eval_step = 0, 0, None
+        step, epoch, in_epoch, last_eval_step = 0, 0, False, None
+        wrap_iter = ckpt is not None
         window_loss = torch.zeros((), device=self.device)
         log_window: list[torch.Tensor] = []
         train_loss: float | None = None
@@ -148,6 +180,38 @@ class Runner:
 
         def max_steps_reached() -> bool:
             return cfg.max_steps is not None and step >= cfg.max_steps
+
+        def stop_reached() -> bool:
+            return max_steps_reached() or (
+                cfg.max_epochs is not None and epoch >= cfg.max_epochs
+            )
+
+        def epoch_iter():
+            nonlocal wrap_iter
+            if not wrap_iter:
+                return iter(train_loader)
+            wrap_iter = False
+            try:
+                return iter(train_loader)
+            except KeyError as err:
+                raise RuntimeError(
+                    "train pipeline structure differs from checkpoint "
+                    "(num_workers 0<->N or prefetch changed?)"
+                ) from err
+
+        def save() -> None:
+            save_checkpoint(
+                Path(cfg.checkpoint_dir),
+                step=step,
+                epoch=epoch,
+                in_epoch=in_epoch,
+                task=task,
+                optimizer=opt,
+                scheduler=sched,
+                train_loader=train_loader,
+                config=cfg,
+                device=self.device,
+            )
 
         def log_train() -> None:
             nonlocal train_loss
@@ -185,18 +249,49 @@ class Runner:
             window_loss = torch.zeros((), device=self.device)
             if step % cfg.log_every_n_steps == 0:
                 log_train()
+            if max_steps_reached():
+                return
             if (
                 eval_loader is not None
                 and cfg.eval_every_n_steps
                 and step % cfg.eval_every_n_steps == 0
-                and not max_steps_reached()
             ):
                 run_eval()
+            if (
+                cfg.checkpoint_every_n_steps
+                and step % cfg.checkpoint_every_n_steps == 0
+            ):
+                save()
+
+        if ckpt is not None:
+            if (ckpt["scheduler"] is None) != (sched is None):
+                raise ValueError("build_scheduler presence differs from checkpoint")
+            task.load_state_dict(ckpt["task"], strict=True)
+            opt.load_state_dict(ckpt["optimizer"])
+            if sched is not None:
+                sched.load_state_dict(ckpt["scheduler"])
+            train_loader.load_state_dict(ckpt["train_loader"])
+            step, epoch, in_epoch = ckpt["step"], ckpt["epoch"], ckpt["in_epoch"]
+            old = ckpt["config"]
+            for key, new in _jsonable_config(cfg).items():
+                if key != "resume_from" and old.get(key) != new:
+                    logger.warning("%s: %s -> %s", key, old.get(key), new)
+            if cfg.eval_every_n_steps and step % cfg.eval_every_n_steps == 0:
+                last_eval_step = step
+            if not in_epoch and next(epoch_iter(), None) is not None:
+                raise RuntimeError("closed epoch had batches left")
+            restore_rng(ckpt["rng"], self.device)
+        if stop_reached():
+            logger.info(
+                "resumed at step=%d epoch=%d, already at a stop condition", step, epoch
+            )
+            return {"step": step, "epoch": epoch}
 
         task.train()
         while True:
-            n = k = 0
-            for batch in train_loader:
+            resumed_tail = in_epoch
+            in_epoch, n, k = True, 0, 0
+            for batch in epoch_iter():
                 n += 1
                 k += 1
                 with self._autocast():
@@ -226,9 +321,10 @@ class Runner:
                 boundary(k)
                 if max_steps_reached():
                     break
-            if n == 0:
+            if n == 0 and not resumed_tail:
                 raise ValueError("train epoch yielded no batches")
             epoch += 1
+            in_epoch = False
             if cfg.max_epochs and epoch >= cfg.max_epochs:
                 break
             if (
@@ -241,6 +337,8 @@ class Runner:
 
         if log_window:
             log_train()
+        if cfg.checkpoint_dir is not None:
+            save()
         if eval_loader is not None and last_eval_step != step:
             run_eval()
         elapsed = time.perf_counter() - start
