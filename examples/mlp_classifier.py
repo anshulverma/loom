@@ -1,3 +1,4 @@
+#!/usr/bin/env -S uv run python
 from pathlib import Path
 
 import torch
