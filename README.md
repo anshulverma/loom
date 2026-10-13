@@ -1,7 +1,6 @@
 # loom
 
-Offline PyTorch model loops: train, evaluate, predict, and offline batch
-inference. Not for serving.
+loom runs offline PyTorch model loops: train, evaluate, predict and offline batch inference. It is not for serving models.
 
 ## Quickstart
 
@@ -13,7 +12,7 @@ uv run python examples/mlp_classifier.py  # delete runs/mlp_classifier before re
 
 ## Usage
 
-Subclass `Task` (model + step logic) and `DataFeed` (pipelines); `Runner` owns the loops.
+Subclass `Task` for the model and its step logic. Subclass `DataFeed` for the data pipelines. `Runner` owns the loops.
 
 ```python
 import torch
@@ -69,8 +68,9 @@ runner.predict(task, feed, output_dir="runs/regressor/predictions")
 `RunConfig` also takes `grad_accum_steps`, `max_grad_norm`, `precision="bf16"`,
 `checkpoint_every_n_steps` and `eval_every_n_steps`.
 
-Resume with `resume_from="latest"` (or a checkpoint path). `FileExistsError` guards data: a fresh
-`fit` refuses a `checkpoint_dir` holding `step-*.pt`; `predict` refuses a non-empty `output_dir`.
+To resume a run, set `resume_from="latest"` or a checkpoint path in `RunConfig`. To protect earlier results, a `fit` that
+does not resume raises `FileExistsError` when `checkpoint_dir` already holds `step-*.pt` files. `predict` raises
+`FileExistsError` when `output_dir` is non-empty.
 
 ## Layout
 
@@ -97,4 +97,4 @@ m = json.loads((d / "manifest.json").read_text())
 outs = [o for s in m["shards"] for o in torch.load(d / s)]
 ```
 
-Proprietary; see LICENSE
+Proprietary. See LICENSE.
