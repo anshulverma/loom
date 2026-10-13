@@ -23,6 +23,7 @@ build-backend = "uv_build"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["examples"]
+filterwarnings = ["ignore:Failed to initialize NumPy:UserWarning"]
 
 [tool.ruff.lint]
 extend-select = ["I", "UP", "B"]
