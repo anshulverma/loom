@@ -134,3 +134,15 @@ def test_resume_changed_pipeline_structure_raises(tmp_path):
     with pytest.raises(RuntimeError, match="train pipeline structure differs"):
         fit(2, max_steps=4, resume_from="latest")
     assert latest_checkpoint(tmp_path).name == "step-00000002.pt"
+
+
+def test_resume_at_epoch_boundary_returns_only_floats(tmp_path):
+    data = SyntheticFeed(make_dataset(64), make_dataset(16, seed=1), batch_size=8)
+    cfg = {"device": "cpu", "checkpoint_dir": tmp_path}
+    Runner(RunConfig(**cfg, max_steps=8)).fit(MLPClassifier(), data)
+    out = Runner(RunConfig(**cfg, max_epochs=1, resume_from="latest")).fit(
+        MLPClassifier(), data
+    )
+    assert (out["step"], out["epoch"]) == (8, 1)
+    assert "train/loss" not in out
+    assert all(isinstance(v, (int, float)) for v in out.values())

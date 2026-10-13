@@ -284,6 +284,7 @@ class Runner:
             if not in_epoch and next(epoch_iter(), None) is not None:
                 raise RuntimeError("closed epoch had batches left")
             restore_rng(ckpt["rng"], self.device)
+            ckpt = None
         if stop_reached():
             logger.info(
                 "resumed at step=%d epoch=%d, already at a stop condition", step, epoch
@@ -346,7 +347,10 @@ class Runner:
             run_eval()
         elapsed = time.perf_counter() - start
         logger.info("fit done step=%d epoch=%d elapsed=%.2fs", step, epoch, elapsed)
-        return {"step": step, "epoch": epoch, "train/loss": train_loss, **eval_metrics}
+        out: dict[str, float] = {"step": step, "epoch": epoch}
+        if train_loss is not None:
+            out["train/loss"] = train_loss
+        return {**out, **eval_metrics}
 
     def evaluate(self, task: Task, data: DataFeed) -> dict[str, float]:
         _require(task, ("eval_step",), "evaluate")
