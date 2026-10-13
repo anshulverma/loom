@@ -1,0 +1,28 @@
+[project]
+name = "loom"
+version = "0.1.0"
+description = "Offline PyTorch model loops: train, evaluate, predict, batch inference."
+readme = "README.md"
+requires-python = ">=3.12"
+classifiers = ["Private :: Do Not Upload"]
+dependencies = [
+    "torch>=2.14",
+    "torchdata>=0.11",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.17.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.15,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["examples"]
+
+[tool.ruff.lint]
+extend-select = ["I", "UP", "B"]
