@@ -1,4 +1,6 @@
+import json
 import logging
+import os
 import random
 import sys
 import time
@@ -12,6 +14,7 @@ import torch
 from loom.checkpoint import (
     _checkpoint_steps,
     _jsonable_config,
+    atomic_save,
     latest_checkpoint,
     load_checkpoint,
     restore_rng,
@@ -354,6 +357,65 @@ class Runner:
         metrics = self._eval_loop(task, loader)
         self._log(metrics, None)
         return metrics
+
+    def predict(
+        self,
+        task: Task,
+        data: DataFeed,
+        *,
+        output_dir: str | os.PathLike[str] | None = None,
+        batches_per_shard: int = 100,
+    ) -> list[Any] | list[Path]:
+        """Per-batch CPU outputs in memory, or shard paths when `output_dir` is set."""
+        if batches_per_shard < 1:
+            raise ValueError(f"batches_per_shard must be >= 1, got {batches_per_shard}")
+        _require(task, ("predict_step",), "predict")
+        out_dir = None if output_dir is None else Path(output_dir)
+        if out_dir is not None:
+            if out_dir.exists() and any(out_dir.iterdir()):
+                raise FileExistsError(f"{out_dir} is not empty")
+            out_dir.mkdir(parents=True, exist_ok=True)
+        loader = _to_loader(data.predict_pipeline(), "predict_pipeline")
+        if loader is None:
+            raise ValueError(
+                "predict needs data.predict_pipeline() to return a pipeline"
+            )
+        task = self._setup(task)
+        cpu = torch.device("cpu")
+        results: list[Any] = []
+        shards: list[Path] = []
+        n = 0
+        was = task.training
+        task.eval()
+        try:
+            # ponytail: may move to inference_mode if profiling justifies it.
+            with torch.no_grad():
+                for batch in loader:
+                    with self._autocast():
+                        out = task.predict_step(_to_device(batch, self.device))
+                    results.append(_to_device(out, cpu))
+                    n += 1
+                    if out_dir is not None and len(results) == batches_per_shard:
+                        shards.append(self._write_shard(out_dir, len(shards), results))
+                        results = []
+        finally:
+            task.train(was)
+        if out_dir is None:
+            return results
+        if results:
+            shards.append(self._write_shard(out_dir, len(shards), results))
+        manifest = {"shards": [p.name for p in shards], "num_batches": n}
+        atomic_save(json.dumps(manifest).encode(), out_dir / "manifest.json")
+        logger.info(
+            "predicted %d batches into %d shards in %s", n, len(shards), out_dir
+        )
+        return shards
+
+    def _write_shard(self, out_dir: Path, i: int, outputs: list[Any]) -> Path:
+        path = out_dir / f"part-{i:05d}.pt"
+        atomic_save(outputs, path)
+        logger.info("wrote %s (%d batches)", path, len(outputs))
+        return path
 
     def _setup(self, task: Task) -> Task:
         return task.to(self.device)
