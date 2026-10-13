@@ -291,4 +291,8 @@ class Runner:
             task.train(was)
 
     def _autocast(self) -> torch.autocast:
-        return torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=False)
+        return torch.autocast(
+            self.device.type,
+            dtype=torch.bfloat16,
+            enabled=self.config.precision == "bf16",
+        )

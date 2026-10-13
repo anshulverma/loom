@@ -1,3 +1,4 @@
+import math
 from collections import namedtuple
 
 import pytest
@@ -299,3 +300,29 @@ def test_plateau_scheduler_rejected():
     task.build_scheduler = lambda opt: torch.optim.lr_scheduler.ReduceLROnPlateau(opt)
     with pytest.raises(TypeError, match="ReduceLROnPlateau"):
         Runner(cfg(max_steps=1)).fit(task, small)
+
+
+def test_bf16_autocast_on_cpu():
+    seen = set()
+
+    class Probe(MLPClassifier):
+        def train_step(self, batch):
+            seen.add(self.net(batch[0]).dtype)
+            return super().train_step(batch)
+
+    task = Probe()
+    out = Runner(cfg(precision="bf16", max_steps=2)).fit(task, small)
+    assert seen == {torch.bfloat16}
+    assert all(p.dtype == torch.float32 for p in task.parameters())
+    assert math.isfinite(out["train/loss"])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+def test_fit_on_cuda_bf16():
+    seed(0)
+    task = MLPClassifier()
+    r = Runner(RunConfig(device="cuda", precision="bf16", max_epochs=5))
+    before = r.evaluate(task, small)["loss"]
+    r.fit(task, small)
+    assert all(p.device.type == "cuda" for p in task.parameters())
+    assert r.evaluate(task, small)["loss"] < before
