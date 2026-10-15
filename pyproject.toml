@@ -1,14 +1,24 @@
 [project]
-name = "loom"
+name = "loom-torch"
 version = "0.1.0"
 description = "Offline PyTorch model loops: train, evaluate, predict, batch inference."
 readme = "README.md"
 requires-python = ">=3.12"
-classifiers = ["Private :: Do Not Upload"]
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Anshul Verma", email = "anshul.verma86@gmail.com" }]
+keywords = ["pytorch", "training", "inference"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "torch>=2.14",
     "torchdata>=0.11",
 ]
+
+[project.urls]
+Repository = "https://github.com/anshulverma/loom"
 
 [dependency-groups]
 dev = [
@@ -27,3 +37,6 @@ filterwarnings = ["ignore:Failed to initialize NumPy:UserWarning"]
 
 [tool.ruff.lint]
 extend-select = ["I", "UP", "B"]
+
+[tool.uv.build-backend]
+module-name = "loom"

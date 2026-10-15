@@ -2,7 +2,17 @@
 
 loom runs offline PyTorch model loops: train, evaluate, predict and offline batch inference. It is not for serving models.
 
+## Install
+
+```bash
+pip install loom-torch
+```
+
+The package imports as `loom`.
+
 ## Quickstart
+
+From a clone of this repo:
 
 ```bash
 uv sync
@@ -18,7 +28,7 @@ Subclass `Task` for the model and its step logic. Subclass `DataFeed` for the da
 A `Task` is an `nn.Module` that implements `train_step` (returns the loss) and `build_optimizer`. It adds `eval_step`
 (returns a dict of metrics), `predict_step` and `build_scheduler` when it needs them. A `DataFeed` returns pipelines from
 `train_pipeline`, `eval_pipeline` and `predict_pipeline`, usually built with `build_pipeline(dataset, batch_size=...)`.
-[`examples/regressor.py`](examples/regressor.py) shows all of it in about 70 lines.
+[`examples/regressor.py`](https://github.com/anshulverma/loom/blob/main/examples/regressor.py) shows all of it in about 70 lines.
 
 `RunConfig` holds every run setting: the stop condition (`max_epochs` or `max_steps`), `device`, `checkpoint_dir`, plus
 `grad_accum_steps`, `max_grad_norm`, `precision="bf16"`, `checkpoint_every_n_steps` and `eval_every_n_steps`.
@@ -54,4 +64,4 @@ m = json.loads((d / "manifest.json").read_text())
 outs = [o for s in m["shards"] for o in torch.load(d / s)]
 ```
 
-Proprietary. See LICENSE.
+MIT. See LICENSE.
